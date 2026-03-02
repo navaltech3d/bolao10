@@ -1,0 +1,580 @@
+import express from 'express';
+import { createServer as createViteServer } from 'vite';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import cors from 'cors';
+import { supabase } from './src/supabase.ts';
+
+const app = express();
+const PORT = 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'bolao10-secret-key-2024';
+
+// Ensure uploads directory exists
+const uploadsDir = path.resolve(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir);
+}
+
+app.use(cors());
+app.use(express.json());
+app.use('/uploads', express.static(uploadsDir));
+
+// Multer config
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+const upload = multer({ storage });
+
+// Auth Middleware
+const authenticate = (req: any, res: any, next: any) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+const isAdmin = (req: any, res: any, next: any) => {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  next();
+};
+
+// --- API ROUTES ---
+
+app.get('/api/health', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('users').select('count', { count: 'exact', head: true });
+    if (error) throw error;
+    res.json({ status: 'ok', db: 'connected', userCount: data });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', db: 'disconnected', error: err.message });
+  }
+});
+
+// Auth
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, name, nickname } = req.body;
+  try {
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const { data, error } = await supabase
+      .from('users')
+      .insert([{ email, password: hashedPassword, name, nickname }])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const token = jwt.sign({ id: data.id, email: data.email, role: data.role, name: data.name, nickname: data.nickname }, JWT_SECRET);
+    res.json({ token, user: { id: data.id, email: data.email, name: data.name, role: data.role, nickname: data.nickname } });
+  } catch (err: any) {
+    console.error('Register error:', err);
+    res.status(400).json({ error: 'Email ou Nickname já existe ou dados inválidos' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (error || !user || !bcrypt.compareSync(password, user.password)) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role, name: user.name, nickname: user.nickname }, JWT_SECRET);
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, nickname: user.nickname } });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Falha no login' });
+  }
+});
+
+// Rounds & Games
+app.get('/api/rounds', async (req, res) => {
+  try {
+    const { data: rounds, error } = await supabase
+      .from('rounds')
+      .select('*')
+      .order('number', { ascending: false });
+    if (error) throw error;
+    res.json(rounds || []);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar rodadas' });
+  }
+});
+
+app.get('/api/rounds/latest', async (req, res) => {
+  try {
+    const { data: round, error: roundErr } = await supabase
+      .from('rounds')
+      .select('*')
+      .order('number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (roundErr) throw roundErr;
+    if (!round) return res.json(null);
+
+    const { data: games } = await supabase
+      .from('games')
+      .select('*')
+      .eq('round_id', round.id)
+      .order('game_order', { ascending: true });
+
+    const { data: jackpotSetting } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'jackpot_pool')
+      .maybeSingle();
+
+    res.json({ ...round, games: games || [], jackpotPool: parseFloat(jackpotSetting?.value || '0') });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar última rodada' });
+  }
+});
+
+app.get('/api/rounds/current', async (req, res) => {
+  try {
+    const { data: round, error: roundErr } = await supabase
+      .from('rounds')
+      .select('*')
+      .or('status.neq.finished,status.is.null')
+      .order('number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (roundErr) {
+      console.error('Fetch current round error:', roundErr);
+      return res.status(500).json({ error: roundErr.message });
+    }
+
+    if (!round) return res.json(null);
+
+    const { data: games, error: gamesErr } = await supabase
+      .from('games')
+      .select('*')
+      .eq('round_id', round.id)
+      .order('game_order', { ascending: true });
+
+    if (gamesErr) console.error('Fetch games error:', gamesErr);
+
+    const { data: jackpotSetting, error: jackpotErr } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'jackpot_pool')
+      .maybeSingle();
+
+    if (jackpotErr) console.error('Fetch jackpot error:', jackpotErr);
+
+    res.json({ ...round, games: games || [], jackpotPool: parseFloat(jackpotSetting?.value || '0'), entry_value: round.entry_value || 10 });
+  } catch (err) {
+    console.error('Current round route error:', err);
+    res.status(500).json({ error: 'Erro interno ao buscar rodada' });
+  }
+});
+
+app.get('/api/rounds/:id', async (req, res) => {
+  try {
+    const { data: round, error: roundErr } = await supabase
+      .from('rounds')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (roundErr) throw roundErr;
+
+    const { data: games } = await supabase
+      .from('games')
+      .select('*')
+      .eq('round_id', round.id)
+      .order('game_order', { ascending: true });
+
+    const { data: jackpotSetting } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'jackpot_pool')
+      .maybeSingle();
+
+    res.json({ ...round, games: games || [], jackpotPool: parseFloat(jackpotSetting?.value || '0') });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar detalhes da rodada' });
+  }
+});
+
+app.get('/api/my-predictions', authenticate, async (req: any, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('predictions')
+      .select('*, rounds(number)')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const formatted = data?.map((p: any) => ({
+      ...p,
+      round_number: p.rounds?.number || '?'
+    }));
+
+    res.json(formatted || []);
+  } catch (err) {
+    res.status(500).json({ error: 'Falha ao buscar seus palpites' });
+  }
+});
+
+app.post('/api/predictions', authenticate, upload.single('proof'), async (req: any, res) => {
+  try {
+    const { roundId, guesses } = req.body;
+    const parsedGuesses = JSON.parse(guesses);
+    const proofPath = req.file?.path;
+
+    if (!proofPath) return res.status(400).json({ error: 'Comprovante é obrigatório' });
+
+    // 1. Create prediction
+    const { data: prediction, error: predErr } = await supabase
+      .from('predictions')
+      .insert([{ 
+        user_id: req.user.id, 
+        round_id: roundId, 
+        proof_path: proofPath,
+        status: 'pending'
+      }])
+      .select()
+      .single();
+
+    if (predErr) throw predErr;
+
+    // 2. Create items
+    const items = Object.entries(parsedGuesses).map(([gameId, guess]) => ({
+      prediction_id: prediction.id,
+      game_id: gameId,
+      guess
+    }));
+
+    const { error: itemsErr } = await supabase.from('prediction_items').insert(items);
+    if (itemsErr) throw itemsErr;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Prediction submission error:', err);
+    res.status(500).json({ error: 'Falha ao enviar palpite' });
+  }
+});
+
+app.get('/api/rounds/:id/transparency', async (req, res) => {
+  try {
+    const { data: predictions, error } = await supabase
+      .from('predictions')
+      .select('*, users(name, nickname), prediction_items(*)')
+      .eq('round_id', req.params.id)
+      .eq('status', 'approved');
+
+    if (error) throw error;
+
+    const formatted = predictions?.map((p: any) => ({
+      id: p.id,
+      user_name: p.users.nickname || p.users.name,
+      score: p.score,
+      items: (p.prediction_items || []).sort((a: any, b: any) => a.game_id - b.game_id)
+    }));
+
+    res.json(formatted || []);
+  } catch (err) {
+    res.status(500).json({ error: 'Falha ao buscar transparência' });
+  }
+});
+
+app.get('/api/rounds/:id/check-prediction', authenticate, async (req: any, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('predictions')
+      .select('id')
+      .eq('round_id', req.params.id)
+      .eq('user_id', req.user.id)
+      .eq('status', 'approved')
+      .maybeSingle();
+
+    if (error) throw error;
+    res.json({ hasPrediction: !!data });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao verificar palpite' });
+  }
+});
+
+// Admin: User Management
+app.get('/api/admin/users', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('id, email, name, nickname, role, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: 'Falha ao buscar usuários' });
+  }
+});
+
+app.put('/api/admin/users/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { name, nickname, role } = req.body;
+    const { error } = await supabase
+      .from('users')
+      .update({ name, nickname, role })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Falha ao atualizar usuário' });
+  }
+});
+
+app.delete('/api/admin/users/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Falha ao excluir usuário' });
+  }
+});
+
+// Admin: Financial Summary
+app.get('/api/admin/financial-summary', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { data: rounds } = await supabase
+      .from('rounds')
+      .select('*')
+      .eq('status', 'finished')
+      .order('number', { ascending: false });
+
+    const summary = await Promise.all((rounds || []).map(async (r: any) => {
+      const { count } = await supabase
+        .from('predictions')
+        .select('*', { count: 'exact', head: true })
+        .eq('round_id', r.id)
+        .eq('status', 'approved');
+      
+      const totalCollection = (count || 0) * (r.entry_value || 10);
+      const adminFee = totalCollection * 0.20;
+      const winnersPool = totalCollection * 0.75;
+      const jackpotContribution = totalCollection * 0.05;
+
+      return {
+        id: r.id,
+        number: r.number,
+        total_collected: totalCollection,
+        admin_fee_collected: adminFee,
+        winners_prize: winnersPool,
+        jackpot_contribution: jackpotContribution,
+        approved_count: count,
+        winners_names: r.winners_names
+      };
+    }));
+
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: 'Falha ao gerar resumo financeiro' });
+  }
+});
+
+// Admin Routes
+app.post('/api/admin/rounds', authenticate, isAdmin, async (req, res) => {
+  const { number, startTime, games, entryValue } = req.body;
+  
+  try {
+    const { data: round, error: roundErr } = await supabase
+      .from('rounds')
+      .insert([{ number, start_time: startTime, entry_value: entryValue || 10, status: 'open' }])
+      .select()
+      .single();
+
+    if (roundErr) throw roundErr;
+
+    const gameItems = games.map((g: any, index: number) => ({
+      round_id: round.id,
+      home_team: g.home,
+      away_team: g.away,
+      game_order: index
+    }));
+
+    const { error: gamesErr } = await supabase.from('games').insert(gameItems);
+    if (gamesErr) throw gamesErr;
+
+    res.json({ success: true, roundId: round.id });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create round' });
+  }
+});
+
+app.get('/api/admin/pending-predictions', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { data: predictions } = await supabase
+      .from('predictions')
+      .select(`
+        *,
+        users (name, email),
+        rounds (number)
+      `)
+      .eq('status', 'pending');
+
+    const formatted = predictions?.map((p: any) => ({
+      ...p,
+      user_name: p.users.name,
+      user_nickname: p.users.nickname,
+      user_email: p.users.email,
+      round_number: p.rounds.number
+    }));
+
+    res.json(formatted || []);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch pending' });
+  }
+});
+
+app.post('/api/admin/predictions/:id/validate', authenticate, isAdmin, async (req, res) => {
+  const { status } = req.body;
+  const { error } = await supabase
+    .from('predictions')
+    .update({ status })
+    .eq('id', req.params.id);
+  
+  if (error) return res.status(500).json({ error: 'Validation failed' });
+  res.json({ success: true });
+});
+
+app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res) => {
+  const { results } = req.body;
+  
+  try {
+    // 1. Get round info
+    const { data: round } = await supabase.from('rounds').select('*').eq('id', req.params.id).single();
+    const entryValue = round?.entry_value || 10;
+
+    // 2. Update game results
+    for (const gameId in results) {
+      await supabase.from('games').update({ result: results[gameId] }).eq('id', gameId);
+    }
+
+    // 3. Calculate scores
+    const { data: predictions } = await supabase
+      .from('predictions')
+      .select('id, user_id, users(name, nickname)')
+      .eq('round_id', req.params.id)
+      .eq('status', 'approved');
+
+    if (predictions) {
+      for (const p of predictions) {
+        const { data: items } = await supabase.from('prediction_items').select('game_id, guess').eq('prediction_id', p.id);
+        let score = 0;
+        items?.forEach((item: any) => {
+          if (results[item.game_id] === item.guess) score++;
+        });
+        await supabase.from('predictions').update({ score }).eq('id', p.id);
+      }
+    }
+
+    // 4. Calculate prizes
+    const { count: approvedCount } = await supabase
+      .from('predictions')
+      .select('*', { count: 'exact', head: true })
+      .eq('round_id', req.params.id)
+      .eq('status', 'approved');
+
+    const totalCollection = (approvedCount || 0) * entryValue;
+    const winnersPool = totalCollection * 0.75;
+    const adminFee = totalCollection * 0.20;
+    const jackpotContribution = totalCollection * 0.05;
+
+    const { data: jackpotSetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_pool').single();
+    let newJackpot = parseFloat(jackpotSetting?.value || '0') + jackpotContribution;
+
+    // Find winners (highest score)
+    const { data: scoredPredictions } = await supabase
+      .from('predictions')
+      .select('score, users(name, nickname)')
+      .eq('round_id', req.params.id)
+      .eq('status', 'approved')
+      .order('score', { ascending: false });
+
+    const maxScore = scoredPredictions?.[0]?.score || 0;
+    const winners = scoredPredictions?.filter(p => p.score === maxScore).map(p => {
+      const u = Array.isArray(p.users) ? p.users[0] : p.users;
+      return u?.nickname || u?.name;
+    }) || [];
+    
+    // Check if anyone got 10/10 for jackpot
+    const tenCorrect = scoredPredictions?.filter(p => p.score === 10) || [];
+
+    let jackpotWinnerNames = null;
+    let jackpotPrizePaid = 0;
+    const jackpotValue = parseFloat(jackpotSetting?.value || '0') + jackpotContribution;
+
+    if (tenCorrect && tenCorrect.length > 0) {
+      jackpotWinnerNames = tenCorrect.map(p => {
+        const u = Array.isArray(p.users) ? p.users[0] : p.users;
+        return u?.nickname || u?.name;
+      }).join(', ');
+      jackpotPrizePaid = jackpotValue;
+      newJackpot = 0;
+    }
+
+    await supabase.from('settings').update({ value: newJackpot.toString() }).eq('key', 'jackpot_pool');
+    
+    // Update round with financial results
+    await supabase.from('rounds').update({ 
+      status: 'finished', 
+      jackpot_contribution: jackpotContribution,
+      total_collected: totalCollection,
+      winners_prize: winnersPool,
+      admin_fee_collected: adminFee,
+      winners_names: winners.join(', '),
+      jackpot_winners_names: jackpotWinnerNames,
+      jackpot_prize_paid: jackpotPrizePaid
+    }).eq('id', req.params.id);
+
+    res.json({ success: true, summary: { winnersPool, adminFee, jackpotContribution, winners, jackpotWinnerNames, jackpotPrizePaid } });
+  } catch (err) {
+    console.error('Finish round error:', err);
+    res.status(500).json({ error: 'Failed to finish round' });
+  }
+});
+
+// Handle 404 for API routes to prevent falling through to SPA fallback
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ error: `API route not found: ${req.method} ${req.url}` });
+});
+
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
