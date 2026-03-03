@@ -84,6 +84,9 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email e senha são obrigatórios' });
+  }
   try {
     const { data: user, error } = await supabase
       .from('users')
@@ -91,7 +94,19 @@ app.post('/api/auth/login', async (req, res) => {
       .eq('email', email)
       .single();
 
-    if (error || !user || !bcrypt.compareSync(password, user.password)) {
+    if (error || !user || !user.password) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    let isValidPassword = false;
+    try {
+      isValidPassword = bcrypt.compareSync(password, user.password);
+    } catch (e) {
+      // Se a senha no banco não for um hash válido (ex: inserida manualmente)
+      isValidPassword = password === user.password;
+    }
+
+    if (!isValidPassword) {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
@@ -209,7 +224,33 @@ app.get('/api/rounds/:id', async (req, res) => {
       .eq('key', 'jackpot_pool')
       .maybeSingle();
 
-    res.json({ ...round, games: games || [], jackpotPool: parseFloat(jackpotSetting?.value || '0') });
+    const { data: historySetting } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'jackpot_history')
+      .maybeSingle();
+
+    let jackpotWinnerNames = null;
+    let jackpotPrizePaid = 0;
+
+    if (historySetting?.value) {
+      try {
+        const history = JSON.parse(historySetting.value);
+        const roundJackpot = history.find((jh: any) => jh.round_id == round.id);
+        if (roundJackpot) {
+          jackpotWinnerNames = roundJackpot.winners_names;
+          jackpotPrizePaid = roundJackpot.prize_paid;
+        }
+      } catch (e) {}
+    }
+
+    res.json({ 
+      ...round, 
+      games: games || [], 
+      jackpotPool: parseFloat(jackpotSetting?.value || '0'),
+      jackpot_winners_names: jackpotWinnerNames,
+      jackpot_prize_paid: jackpotPrizePaid
+    });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao buscar detalhes da rodada' });
   }
@@ -234,6 +275,116 @@ app.get('/api/my-predictions', authenticate, async (req: any, res) => {
     res.json(formatted || []);
   } catch (err) {
     res.status(500).json({ error: 'Falha ao buscar seus palpites' });
+  }
+});
+
+app.get('/api/my-wallet', authenticate, async (req: any, res) => {
+  try {
+    const { data: predictions, error } = await supabase
+      .from('predictions')
+      .select('*, rounds(entry_value, status, winners_names, winners_prize)')
+      .eq('user_id', req.user.id)
+      .eq('status', 'approved'); // Only count approved predictions for spending
+
+    if (error) throw error;
+
+    const { data: historySetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_history').maybeSingle();
+    let jackpotHistory: any[] = [];
+    try {
+      if (historySetting?.value) jackpotHistory = JSON.parse(historySetting.value);
+    } catch (e) {}
+
+    let totalSpent = 0;
+    let totalWinnings = 0;
+    const predictionsMade = predictions?.length || 0;
+
+    predictions?.forEach((p: any) => {
+      const entryValue = p.rounds?.entry_value || 10;
+      totalSpent += entryValue;
+
+      if (p.rounds?.status === 'finished') {
+        // Check if user won the regular prize
+        const winners = p.rounds?.winners_names?.split(',').map((w: string) => w.trim()) || [];
+        if (winners.includes(req.user.nickname) || winners.includes(req.user.name)) {
+          totalWinnings += (p.rounds?.winners_prize || 0) / winners.length;
+        }
+
+        // Check if user won the jackpot
+        const roundJackpot = jackpotHistory.find(jh => jh.round_id == p.rounds?.id);
+        if (roundJackpot) {
+          const jackpotWinners = roundJackpot.winners_names?.split(',').map((w: string) => w.trim()) || [];
+          if (jackpotWinners.includes(req.user.nickname) || jackpotWinners.includes(req.user.name)) {
+            totalWinnings += (roundJackpot.prize_paid || 0) / jackpotWinners.length;
+          }
+        }
+      }
+    });
+
+    res.json({ totalSpent, predictionsMade, totalWinnings });
+  } catch (err) {
+    console.error('Wallet error:', err);
+    res.status(500).json({ error: 'Falha ao buscar resumo financeiro' });
+  }
+});
+
+app.get('/api/my-notifications', authenticate, async (req: any, res) => {
+  try {
+    const { data: predictions, error } = await supabase
+      .from('predictions')
+      .select('id, rounds(id, number, status, winners_names, winners_prize)')
+      .eq('user_id', req.user.id)
+      .eq('status', 'approved');
+
+    if (error) throw error;
+
+    const { data: historySetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_history').maybeSingle();
+    let jackpotHistory: any[] = [];
+    try {
+      if (historySetting?.value) jackpotHistory = JSON.parse(historySetting.value);
+    } catch (e) {}
+
+    const notifications: any[] = [];
+    const processedRounds = new Set();
+
+    predictions?.forEach((p: any) => {
+      if (p.rounds?.status === 'finished' && !processedRounds.has(p.rounds.id)) {
+        processedRounds.add(p.rounds.id);
+        
+        const winners = p.rounds?.winners_names?.split(',').map((w: string) => w.trim()) || [];
+        if (winners.includes(req.user.nickname) || winners.includes(req.user.name)) {
+          const prize = (p.rounds?.winners_prize || 0) / winners.length;
+          notifications.push({
+            id: `win-main-${p.rounds.id}`,
+            type: 'win_main',
+            title: 'Parabéns! Você ganhou!',
+            message: `Você foi um dos vencedores da Rodada ${p.rounds.number} e ganhou R$ ${prize.toFixed(2)}!`,
+            roundId: p.rounds.id,
+            amount: prize
+          });
+        }
+
+        const roundJackpot = jackpotHistory.find(jh => jh.round_id == p.rounds?.id);
+        if (roundJackpot) {
+          const jackpotWinners = roundJackpot.winners_names?.split(',').map((w: string) => w.trim()) || [];
+          if (jackpotWinners.includes(req.user.nickname) || jackpotWinners.includes(req.user.name)) {
+            const prize = (roundJackpot.prize_paid || 0) / jackpotWinners.length;
+            notifications.push({
+              id: `win-jackpot-${p.rounds.id}`,
+              type: 'win_jackpot',
+              title: 'JACKPOT! Bônus 10!',
+              message: `Você acertou todos os 10 jogos da Rodada ${p.rounds.number} e ganhou o Bônus de R$ ${prize.toFixed(2)}!`,
+              roundId: p.rounds.id,
+              amount: prize
+            });
+          }
+        }
+      }
+    });
+
+    res.json(notifications);
+  } catch (err) {
+    console.error('Notifications error:', err);
+    res.status(500).json({ error: 'Falha ao buscar notificações' });
   }
 });
 
@@ -576,6 +727,22 @@ app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res)
     if (updateErr) {
       console.error('Error updating round status:', updateErr);
       throw updateErr;
+    }
+
+    if (jackpotWinnerNames) {
+      const { data: historySetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_history').maybeSingle();
+      let history = [];
+      try {
+        if (historySetting?.value) history = JSON.parse(historySetting.value);
+      } catch (e) {}
+      history.push({
+        round_id: req.params.id,
+        winners_names: jackpotWinnerNames,
+        prize_paid: jackpotPrizePaid
+      });
+      
+      const { error: upsertErr } = await supabase.from('settings').upsert({ key: 'jackpot_history', value: JSON.stringify(history) }, { onConflict: 'key' });
+      if (upsertErr) console.error('Error saving jackpot history:', upsertErr);
     }
 
     res.json({ success: true, summary: { winnersPool, adminFee, jackpotContribution, winners, jackpotWinnerNames, jackpotPrizePaid } });

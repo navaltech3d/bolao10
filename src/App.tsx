@@ -23,7 +23,11 @@ import {
   DollarSign,
   FileText,
   BarChart2,
-  ListOrdered
+  ListOrdered,
+  TrendingDown,
+  Info,
+  ArrowLeft,
+  Bell
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
@@ -34,6 +38,118 @@ import { Download } from 'lucide-react';
 
 // --- COMPONENTS ---
 
+const NotificationsDropdown = () => {
+  const { token } = useAuth();
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const dropdownRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    const fetchNotifications = async () => {
+      if (!token) return;
+      try {
+        const res = await fetch('/api/my-notifications', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setNotifications(data);
+          
+          const readIds = JSON.parse(localStorage.getItem('read_notifications') || '[]');
+          const unread = data.filter((n: any) => !readIds.includes(n.id));
+          setUnreadCount(unread.length);
+        }
+      } catch (err) {
+        console.error('Failed to fetch notifications');
+      }
+    };
+    
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, [token]);
+
+  const handleOpen = () => {
+    setIsOpen(!isOpen);
+    if (!isOpen && unreadCount > 0) {
+      const readIds = JSON.parse(localStorage.getItem('read_notifications') || '[]');
+      const newReadIds = [...new Set([...readIds, ...notifications.map(n => n.id)])];
+      localStorage.setItem('read_notifications', JSON.stringify(newReadIds));
+      setUnreadCount(0);
+    }
+  };
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button 
+        onClick={handleOpen}
+        className="relative p-2 text-gray-500 hover:text-primary transition-colors rounded-full hover:bg-gray-100"
+      >
+        <Bell className="w-5 h-5" />
+        {unreadCount > 0 && (
+          <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
+        )}
+      </button>
+
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.95 }}
+            className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden z-50"
+          >
+            <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
+              <h3 className="font-bold text-gray-900">Notificações</h3>
+              {unreadCount > 0 && (
+                <span className="bg-primary text-white text-xs px-2 py-1 rounded-full font-medium">
+                  {unreadCount} novas
+                </span>
+              )}
+            </div>
+            
+            <div className="max-h-96 overflow-y-auto">
+              {notifications.length === 0 ? (
+                <div className="p-6 text-center text-gray-500">
+                  <Bell className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                  <p className="text-sm">Nenhuma notificação no momento.</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {notifications.map((notif) => (
+                    <div key={notif.id} className="p-4 hover:bg-gray-50 transition-colors">
+                      <div className="flex items-start space-x-3">
+                        <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+                          <Trophy className="w-5 h-5 text-green-600" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold text-gray-900">{notif.title}</p>
+                          <p className="text-sm text-gray-600 mt-0.5 leading-snug">{notif.message}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
 const Navbar = ({ onNavigate, currentPage }: { onNavigate: (page: string) => void, currentPage: string }) => {
   const { user, logout, isAdmin } = useAuth();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -41,6 +157,7 @@ const Navbar = ({ onNavigate, currentPage }: { onNavigate: (page: string) => voi
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, show: !!user },
     { id: 'predictions', label: 'Fazer Palpite', icon: Trophy, show: !!user && !isAdmin },
+    { id: 'wallet', label: 'Minha Carteira', icon: Wallet, show: !!user && !isAdmin },
     { id: 'transparency', label: 'Transparência', icon: ShieldCheck, show: !!user },
     { id: 'ranking', label: 'Ranking', icon: BarChart2, show: !!user },
     { id: 'terms', label: 'Regras', icon: FileText, show: true },
@@ -75,6 +192,7 @@ const Navbar = ({ onNavigate, currentPage }: { onNavigate: (page: string) => voi
           <div className="hidden sm:ml-6 sm:flex sm:items-center space-x-4">
             {user ? (
               <div className="flex items-center space-x-4">
+                <NotificationsDropdown />
                 <div className="flex items-center text-sm text-gray-700">
                   <UserIcon className="w-4 h-4 mr-2" />
                   {user.name}
@@ -95,7 +213,8 @@ const Navbar = ({ onNavigate, currentPage }: { onNavigate: (page: string) => voi
               </button>
             )}
           </div>
-          <div className="flex items-center sm:hidden">
+          <div className="flex items-center sm:hidden space-x-2">
+            {user && <NotificationsDropdown />}
             <button
               onClick={() => setIsMenuOpen(!isMenuOpen)}
               className="text-gray-500 hover:text-gray-700"
@@ -334,6 +453,108 @@ const LoginPage = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
           </button>
         </div>
       </motion.div>
+    </div>
+  );
+};
+
+const WalletPage = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
+  const { token, user } = useAuth();
+  const [walletData, setWalletData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchWallet = async () => {
+      if (!token) return;
+      try {
+        const res = await fetch('/api/my-wallet', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error('Falha ao carregar resumo financeiro');
+        const data = await res.json();
+        setWalletData(data);
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchWallet();
+  }, [token]);
+
+  if (loading) return <div className="flex justify-center items-center h-screen"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div></div>;
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      <header className="bg-primary text-white p-4 flex justify-between items-center shadow-md">
+        <div className="flex items-center space-x-4">
+          <button onClick={() => onNavigate('dashboard')} className="hover:bg-white/10 p-2 rounded-full transition-colors">
+            <ArrowLeft className="w-6 h-6" />
+          </button>
+          <h1 className="text-xl font-bold">Resumo Financeiro</h1>
+        </div>
+      </header>
+      
+      <main className="flex-1 p-4 md:p-8 max-w-4xl mx-auto w-full">
+        {error && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-xl mb-6 flex items-center">
+            <AlertCircle className="w-5 h-5 mr-2" />
+            {error}
+          </div>
+        )}
+
+        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 md:p-8 mb-8">
+          <div className="flex items-center space-x-4 mb-6">
+            <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center text-primary">
+              <Wallet className="w-6 h-6" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-gray-900">Minha Carteira</h2>
+              <p className="text-gray-500">Resumo da sua conta</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="bg-gray-50 rounded-2xl p-6 border border-gray-100">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-gray-500 font-medium">Total Gasto</h3>
+                <TrendingDown className="w-5 h-5 text-red-500" />
+              </div>
+              <p className="text-3xl font-bold text-gray-900">
+                R$ {walletData?.totalSpent?.toFixed(2) || '0.00'}
+              </p>
+            </div>
+
+            <div className="bg-gray-50 rounded-2xl p-6 border border-gray-100">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-gray-500 font-medium">Total Ganho</h3>
+                <TrendingUp className="w-5 h-5 text-green-500" />
+              </div>
+              <p className="text-3xl font-bold text-green-600">
+                R$ {walletData?.totalWinnings?.toFixed(2) || '0.00'}
+              </p>
+            </div>
+
+            <div className="bg-gray-50 rounded-2xl p-6 border border-gray-100">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-gray-500 font-medium">Palpites Feitos</h3>
+                <Trophy className="w-5 h-5 text-primary" />
+              </div>
+              <p className="text-3xl font-bold text-gray-900">
+                {walletData?.predictionsMade || 0}
+              </p>
+            </div>
+          </div>
+          
+          <div className="mt-8 p-4 bg-blue-50 text-blue-800 rounded-xl text-sm flex items-start">
+            <Info className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" />
+            <p>
+              O total gasto considera apenas os palpites que foram validados pelo administrador. 
+              Os ganhos são calculados com base nas rodadas finalizadas onde você foi um dos vencedores.
+            </p>
+          </div>
+        </div>
+      </main>
     </div>
   );
 };
@@ -1734,6 +1955,7 @@ export default function App() {
       case 'landing': return <LandingPage onNavigate={setPage} />;
       case 'login': return <LoginPage onNavigate={setPage} />;
       case 'dashboard': return <Dashboard onNavigate={setPage} />;
+      case 'wallet': return <WalletPage onNavigate={setPage} />;
       case 'predictions': return <PredictionsPage onNavigate={setPage} />;
       case 'admin': return isAdmin ? <AdminDashboard /> : <Dashboard onNavigate={setPage} />;
       case 'transparency': return <TransparencyPage />;
