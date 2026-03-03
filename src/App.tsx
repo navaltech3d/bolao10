@@ -466,7 +466,9 @@ const Dashboard = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-medium text-gray-700">
-                      {pred.status === 'approved' ? `${pred.score} pontos` : 'Aguardando'}
+                      {pred.status === 'approved' 
+                        ? (pred.round_status === 'finished' ? `${pred.score} pontos` : 'Em andamento') 
+                        : 'Aguardando'}
                     </p>
                     <p className={`text-xs ${
                       pred.status === 'approved' ? 'text-green-600' : 
@@ -709,6 +711,8 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [viewingProof, setViewingProof] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'pending' | 'rounds' | 'users' | 'financial'>('pending');
+  const [showRoundHistory, setShowRoundHistory] = useState(false);
+  const [roundHistory, setRoundHistory] = useState<any[]>([]);
   
   // Create Round State
   const [newRound, setNewRound] = useState({
@@ -753,6 +757,13 @@ const AdminDashboard = () => {
     const res = await fetch('/api/rounds/current');
     const data = await res.json();
     setCurrentRound(data);
+  };
+
+  const fetchRoundHistory = async () => {
+    const res = await fetch('/api/rounds');
+    const data = await res.json();
+    setRoundHistory(data);
+    setShowRoundHistory(true);
   };
 
   useEffect(() => { 
@@ -917,9 +928,18 @@ const AdminDashboard = () => {
       )}
 
       {activeTab === 'rounds' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Create Round */}
-          <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm">
+        <div className="space-y-8">
+          <div className="flex justify-end">
+            <button 
+              onClick={fetchRoundHistory}
+              className="bg-gray-100 text-gray-700 px-6 py-2 rounded-xl font-bold hover:bg-gray-200 transition-all flex items-center"
+            >
+              <Clock className="w-4 h-4 mr-2" /> Histórico de Rodadas
+            </button>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* Create Round */}
+            <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm">
             <h3 className="text-xl font-bold text-primary mb-6">Criar Nova Rodada</h3>
             <form onSubmit={handleCreateRound} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -934,7 +954,7 @@ const AdminDashboard = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Início (Data/Hora)</label>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Limite para Palpites (Data/Hora)</label>
                   <input 
                     type="datetime-local" 
                     required 
@@ -1021,6 +1041,7 @@ const AdminDashboard = () => {
               <p className="text-gray-500 italic">Nenhuma rodada ativa para finalizar.</p>
             )}
           </div>
+        </div>
         </div>
       )}
 
@@ -1159,6 +1180,68 @@ const AdminDashboard = () => {
           </div>
         </div>
       )}
+
+      {/* Round History Modal */}
+      <AnimatePresence>
+        {showRoundHistory && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl max-w-3xl w-full max-h-[80vh] overflow-hidden flex flex-col shadow-2xl"
+            >
+              <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                <h3 className="text-xl font-bold text-primary">Histórico de Rodadas</h3>
+                <button onClick={() => setShowRoundHistory(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+              <div className="overflow-y-auto p-6">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="text-xs font-bold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+                      <th className="px-4 py-3">Rodada</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Início</th>
+                      <th className="px-4 py-3">Arrecadado</th>
+                      <th className="px-4 py-3">Vencedores</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {roundHistory.map((r) => (
+                      <tr key={r.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 font-bold text-primary">#{r.number}</td>
+                        <td className="px-4 py-3">
+                          <span className={`px-2 py-1 rounded-full text-xs font-bold ${r.status === 'open' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
+                            {r.status === 'open' ? 'Aberta' : 'Finalizada'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-500">
+                          {r.start_time ? format(new Date(r.start_time), 'dd/MM/yyyy HH:mm') : '-'}
+                        </td>
+                        <td className="px-4 py-3 text-sm font-bold text-gray-700">
+                          R$ {r.total_collected?.toFixed(2) || '0.00'}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-500 truncate max-w-[150px]">
+                          {r.winners_names || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                    {roundHistory.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                          Nenhuma rodada encontrada.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Edit User Modal */}
       {editingUser && (
@@ -1420,9 +1503,15 @@ const TransparencyPage = () => {
               <div key={p.id} className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
                 <div className="flex justify-between items-center mb-4">
                   <h4 className="font-bold text-primary">{p.user_name}</h4>
-                  <span className="bg-secondary bg-opacity-10 text-secondary px-3 py-1 rounded-full text-xs font-bold">
-                    {p.score} Pontos
-                  </span>
+                  {round?.status === 'finished' ? (
+                    <span className="bg-secondary text-white px-3 py-1 rounded-full text-xs font-bold">
+                      {p.score !== null && p.score !== undefined ? `${p.score} Pontos` : '0 Pontos'}
+                    </span>
+                  ) : (
+                    <span className="bg-gray-100 text-gray-500 px-3 py-1 rounded-full text-xs font-bold">
+                      Em andamento
+                    </span>
+                  )}
                 </div>
                 <div className="grid grid-cols-5 gap-2">
                   {(p.items || []).map((item: any, i: number) => (
@@ -1485,6 +1574,8 @@ const RankingPage = () => {
 
   if (loading && rounds.length === 0) return <div className="p-8">Carregando...</div>;
 
+  const selectedRound = rounds.find(r => r.id.toString() === selectedRoundId);
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 gap-4">
@@ -1528,9 +1619,15 @@ const RankingPage = () => {
                 </td>
                 <td className="px-8 py-5 font-bold text-primary">{item.user_name}</td>
                 <td className="px-8 py-5 text-right">
-                  <span className="bg-secondary bg-opacity-10 text-secondary px-4 py-1 rounded-full font-bold">
-                    {item.score} pts
-                  </span>
+                  {selectedRound?.status === 'finished' ? (
+                    <span className="bg-secondary text-white px-4 py-1 rounded-full font-bold">
+                      {item.score !== null && item.score !== undefined ? `${item.score} pts` : '0 pts'}
+                    </span>
+                  ) : (
+                    <span className="bg-gray-100 text-gray-500 px-4 py-1 rounded-full font-bold text-sm">
+                      Em andamento
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}

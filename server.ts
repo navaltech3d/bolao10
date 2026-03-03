@@ -1,21 +1,20 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import cors from 'cors';
-import { supabase } from './src/supabase.ts';
+import { supabase } from './src/supabase';
 
 const app = express();
 const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'bolao10-secret-key-2024';
 
 // Ensure uploads directory exists
-const uploadsDir = path.resolve(process.cwd(), 'uploads');
+const uploadsDir = process.env.VERCEL ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
+  fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 app.use(cors());
@@ -24,7 +23,7 @@ app.use('/uploads', express.static(uploadsDir));
 
 // Multer config
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
+  destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
     cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
@@ -220,7 +219,7 @@ app.get('/api/my-predictions', authenticate, async (req: any, res) => {
   try {
     const { data, error } = await supabase
       .from('predictions')
-      .select('*, rounds(number)')
+      .select('*, rounds(number, status)')
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false });
 
@@ -228,7 +227,8 @@ app.get('/api/my-predictions', authenticate, async (req: any, res) => {
 
     const formatted = data?.map((p: any) => ({
       ...p,
-      round_number: p.rounds?.number || '?'
+      round_number: p.rounds?.number || '?',
+      round_status: p.rounds?.status || 'open'
     }));
 
     res.json(formatted || []);
@@ -244,6 +244,25 @@ app.post('/api/predictions', authenticate, upload.single('proof'), async (req: a
     const proofPath = req.file?.path;
 
     if (!proofPath) return res.status(400).json({ error: 'Comprovante é obrigatório' });
+
+    // Check if round is open and deadline hasn't passed
+    const { data: round, error: roundErr } = await supabase
+      .from('rounds')
+      .select('status, start_time')
+      .eq('id', roundId)
+      .single();
+
+    if (roundErr || !round) {
+      return res.status(404).json({ error: 'Rodada não encontrada' });
+    }
+
+    if (round.status !== 'open') {
+      return res.status(400).json({ error: 'Esta rodada não está mais aberta para palpites' });
+    }
+
+    if (round.start_time && new Date() > new Date(round.start_time)) {
+      return res.status(400).json({ error: 'O prazo para enviar palpites nesta rodada já encerrou' });
+    }
 
     // 1. Create prediction
     const { data: prediction, error: predErr } = await supabase
@@ -403,7 +422,12 @@ app.post('/api/admin/rounds', authenticate, isAdmin, async (req, res) => {
   try {
     const { data: round, error: roundErr } = await supabase
       .from('rounds')
-      .insert([{ number, start_time: startTime, entry_value: entryValue || 10, status: 'open' }])
+      .insert([{ 
+        number, 
+        start_time: startTime, 
+        entry_value: entryValue || 10, 
+        status: 'open' 
+      }])
       .select()
       .single();
 
@@ -540,16 +564,19 @@ app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res)
     await supabase.from('settings').update({ value: newJackpot.toString() }).eq('key', 'jackpot_pool');
     
     // Update round with financial results
-    await supabase.from('rounds').update({ 
+    const { error: updateErr } = await supabase.from('rounds').update({ 
       status: 'finished', 
       jackpot_contribution: jackpotContribution,
       total_collected: totalCollection,
       winners_prize: winnersPool,
       admin_fee_collected: adminFee,
-      winners_names: winners.join(', '),
-      jackpot_winners_names: jackpotWinnerNames,
-      jackpot_prize_paid: jackpotPrizePaid
+      winners_names: winners.join(', ')
     }).eq('id', req.params.id);
+
+    if (updateErr) {
+      console.error('Error updating round status:', updateErr);
+      throw updateErr;
+    }
 
     res.json({ success: true, summary: { winnersPool, adminFee, jackpotContribution, winners, jackpotWinnerNames, jackpotPrizePaid } });
   } catch (err) {
@@ -565,6 +592,7 @@ app.all('/api/*', (req, res) => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -577,4 +605,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
