@@ -767,11 +767,22 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-//  app.listen(PORT, '0.0.0.0', () => {
-//    console.log(`Server running on http://localhost:${PORT}`);
-  
-if (!process.env.VERCEL) {
+// 1. Defina o seu 'app' aqui, fora de qualquer função
+const app = express();
+// ... suas rotas e middlewares (ex: app.use(vite.middlewares);) ...
+
+// 2. Função para rodar localmente (apenas para desenvolvimento)
+const startServer = () => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+};
+
+// 3. Verifica se estamos rodando localmente (não no Vercel)
+if (process.env.NODE_ENV !== 'production') {
   startServer();
 }
 
+// 4. ESSA É A PARTE CRÍTICA PARA O VERCEL:
+// Você exporta o 'app' para o Vercel lidar com as requisições.
 export default app;
