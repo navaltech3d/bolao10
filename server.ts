@@ -3,9 +3,12 @@ import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
+import * as bcrypt from 'bcryptjs';
 import cors from 'cors';
+import dotenv from 'dotenv';
 import { supabase } from './src/supabase';
+
+dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -84,25 +87,46 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
+  
   if (!email || !password) {
     return res.status(400).json({ error: 'Email e senha são obrigatórios' });
   }
+
   try {
+    // Check if Supabase is configured
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('Supabase environment variables are missing!');
+      // We don't want to crash, but we can't proceed.
+      // If it's the dummy key, it will fail anyway.
+    }
+
     const { data: user, error } = await supabase
       .from('users')
       .select('*')
       .eq('email', email)
       .single();
 
-    if (error || !user || !user.password) {
+    if (error) {
+      console.error('Supabase query error:', error);
+      return res.status(401).json({ error: 'Credenciais inválidas ou erro no banco de dados' });
+    }
+
+    if (!user || !user.password) {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
     let isValidPassword = false;
     try {
-      isValidPassword = bcrypt.compareSync(password, user.password);
+      // Use bcrypt.compareSync safely
+      const compare = (bcrypt as any).compareSync || (bcrypt as any).default?.compareSync;
+      if (typeof compare === 'function') {
+        isValidPassword = compare(password, user.password);
+      } else {
+        console.error('bcrypt.compareSync is not a function');
+        isValidPassword = password === user.password;
+      }
     } catch (e) {
-      // Se a senha no banco não for um hash válido (ex: inserida manualmente)
+      console.warn('Bcrypt comparison failed, falling back to plain text check:', e);
       isValidPassword = password === user.password;
     }
 
@@ -110,11 +134,22 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role, name: user.name, nickname: user.nickname }, JWT_SECRET);
-    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role, nickname: user.nickname } });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Falha no login' });
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role, name: user.name, nickname: user.nickname }, 
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    res.json({ 
+      token, 
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, nickname: user.nickname } 
+    });
+  } catch (err: any) {
+    console.error('Login route crash:', err);
+    res.status(500).json({ 
+      error: 'Erro interno no servidor', 
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined 
+    });
   }
 });
 
@@ -126,7 +161,25 @@ app.get('/api/rounds', async (req, res) => {
       .select('*')
       .order('number', { ascending: false });
     if (error) throw error;
-    res.json(rounds || []);
+
+    const { data: historySetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_history').maybeSingle();
+    let jackpotHistory: any[] = [];
+    if (historySetting?.value) {
+      try {
+        jackpotHistory = JSON.parse(historySetting.value);
+      } catch (e) {}
+    }
+
+    const roundsWithJackpot = rounds?.map(round => {
+      const roundJackpot = jackpotHistory.find(jh => jh.round_id == round.id);
+      return {
+        ...round,
+        jackpot_winners_names: roundJackpot ? roundJackpot.winners_names : null,
+        jackpot_prize_paid: roundJackpot ? roundJackpot.prize_paid : 0
+      };
+    }) || [];
+
+    res.json(roundsWithJackpot);
   } catch (err) {
     res.status(500).json({ error: 'Erro ao buscar rodadas' });
   }
@@ -260,7 +313,7 @@ app.get('/api/my-predictions', authenticate, async (req: any, res) => {
   try {
     const { data, error } = await supabase
       .from('predictions')
-      .select('*, rounds(number, status)')
+      .select('*, rounds(number, status, games(*)), prediction_items(*)')
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false });
 
@@ -269,7 +322,9 @@ app.get('/api/my-predictions', authenticate, async (req: any, res) => {
     const formatted = data?.map((p: any) => ({
       ...p,
       round_number: p.rounds?.number || '?',
-      round_status: p.rounds?.status || 'open'
+      round_status: p.rounds?.status || 'open',
+      games: p.rounds?.games?.sort((a: any, b: any) => a.game_order - b.game_order) || [],
+      items: p.prediction_items || []
     }));
 
     res.json(formatted || []);
@@ -286,7 +341,10 @@ app.get('/api/my-wallet', authenticate, async (req: any, res) => {
       .eq('user_id', req.user.id)
       .eq('status', 'approved'); // Only count approved predictions for spending
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase error in /api/my-wallet:', error);
+      throw error;
+    }
 
     const { data: historySetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_history').maybeSingle();
     let jackpotHistory: any[] = [];
@@ -335,7 +393,10 @@ app.get('/api/my-notifications', authenticate, async (req: any, res) => {
       .eq('user_id', req.user.id)
       .eq('status', 'approved');
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase error in /api/my-notifications:', error);
+      throw error;
+    }
 
     const { data: historySetting } = await supabase.from('settings').select('value').eq('key', 'jackpot_history').maybeSingle();
     let jackpotHistory: any[] = [];
@@ -415,29 +476,33 @@ app.post('/api/predictions', authenticate, upload.single('proof'), async (req: a
       return res.status(400).json({ error: 'O prazo para enviar palpites nesta rodada já encerrou' });
     }
 
-    // 1. Create prediction
-    const { data: prediction, error: predErr } = await supabase
-      .from('predictions')
-      .insert([{ 
-        user_id: req.user.id, 
-        round_id: roundId, 
-        proof_path: proofPath,
-        status: 'pending'
-      }])
-      .select()
-      .single();
+    const guessesArray = Array.isArray(parsedGuesses) ? parsedGuesses : [parsedGuesses];
 
-    if (predErr) throw predErr;
+    for (const singleGuess of guessesArray) {
+      // 1. Create prediction
+      const { data: prediction, error: predErr } = await supabase
+        .from('predictions')
+        .insert([{ 
+          user_id: req.user.id, 
+          round_id: roundId, 
+          proof_path: proofPath,
+          status: 'pending'
+        }])
+        .select()
+        .single();
 
-    // 2. Create items
-    const items = Object.entries(parsedGuesses).map(([gameId, guess]) => ({
-      prediction_id: prediction.id,
-      game_id: gameId,
-      guess
-    }));
+      if (predErr) throw predErr;
 
-    const { error: itemsErr } = await supabase.from('prediction_items').insert(items);
-    if (itemsErr) throw itemsErr;
+      // 2. Create items
+      const items = Object.entries(singleGuess).map(([gameId, guess]) => ({
+        prediction_id: prediction.id,
+        game_id: gameId,
+        guess
+      }));
+
+      const { error: itemsErr } = await supabase.from('prediction_items').insert(items);
+      if (itemsErr) throw itemsErr;
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -543,10 +608,10 @@ app.get('/api/admin/financial-summary', authenticate, isAdmin, async (req, res) 
         .eq('round_id', r.id)
         .eq('status', 'approved');
       
-      const totalCollection = (count || 0) * (r.entry_value || 10);
-      const adminFee = totalCollection * 0.20;
-      const winnersPool = totalCollection * 0.75;
-      const jackpotContribution = totalCollection * 0.05;
+      const totalCollection = r.total_collected !== null ? r.total_collected : (count || 0) * (r.entry_value || 10);
+      const adminFee = r.admin_fee_collected !== null ? r.admin_fee_collected : totalCollection * 0.20;
+      const winnersPool = r.winners_prize !== null ? r.winners_prize : totalCollection * 0.75;
+      const jackpotContribution = r.jackpot_contribution !== null ? r.jackpot_contribution : totalCollection * 0.05;
 
       return {
         id: r.id,
@@ -637,7 +702,7 @@ app.post('/api/admin/predictions/:id/validate', authenticate, isAdmin, async (re
 });
 
 app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res) => {
-  const { results } = req.body;
+  const { results, distributeJackpot } = req.body;
   
   try {
     // 1. Get round info
@@ -675,7 +740,7 @@ app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res)
       .eq('status', 'approved');
 
     const totalCollection = (approvedCount || 0) * entryValue;
-    const winnersPool = totalCollection * 0.75;
+    let winnersPool = totalCollection * 0.75;
     const adminFee = totalCollection * 0.20;
     const jackpotContribution = totalCollection * 0.05;
 
@@ -696,8 +761,10 @@ app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res)
       return u?.nickname || u?.name;
     }) || [];
     
-    // Check if anyone got 10/10 for jackpot
-    const tenCorrect = scoredPredictions?.filter(p => p.score === 10) || [];
+    // Check if anyone got 10/10 for jackpot, or if admin forced jackpot distribution
+    const tenCorrect = distributeJackpot 
+      ? scoredPredictions?.filter(p => p.score === maxScore) || []
+      : scoredPredictions?.filter(p => p.score === 10) || [];
 
     let jackpotWinnerNames = null;
     let jackpotPrizePaid = 0;
@@ -709,7 +776,8 @@ app.post('/api/admin/rounds/:id/finish', authenticate, isAdmin, async (req, res)
         return u?.nickname || u?.name;
       }).join(', ');
       jackpotPrizePaid = jackpotValue;
-      newJackpot = 0;
+      winnersPool += jackpotValue; // Add accumulated bonus to the prize
+      newJackpot = 0; // Start a new bonus count
     }
 
     await supabase.from('settings').update({ value: newJackpot.toString() }).eq('key', 'jackpot_pool');
@@ -767,22 +835,13 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-// 1. Defina o seu 'app' aqui, fora de qualquer função
-const app = express();
-// ... suas rotas e middlewares (ex: app.use(vite.middlewares);) ...
-
-// 2. Função para rodar localmente (apenas para desenvolvimento)
-const startServer = () => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
-};
+}
 
-// 3. Verifica se estamos rodando localmente (não no Vercel)
-if (process.env.NODE_ENV !== 'production') {
+if (!process.env.VERCEL) {
   startServer();
 }
 
-// 4. ESSA É A PARTE CRÍTICA PARA O VERCEL:
-// Você exporta o 'app' para o Vercel lidar com as requisições.
 export default app;

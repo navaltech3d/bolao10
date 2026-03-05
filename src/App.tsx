@@ -35,6 +35,7 @@ import { ptBR } from 'date-fns/locale';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Download } from 'lucide-react';
+import QRCode from 'react-qr-code';
 
 // --- COMPONENTS ---
 
@@ -563,16 +564,21 @@ const Dashboard = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
   const { token, user } = useAuth();
   const [currentRound, setCurrentRound] = useState<any>(null);
   const [myPredictions, setMyPredictions] = useState<any[]>([]);
+  const [walletData, setWalletData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expandedPrediction, setExpandedPrediction] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
       if (!token) return;
       try {
-        const [roundRes, predRes] = await Promise.all([
+        const [roundRes, predRes, walletRes] = await Promise.all([
           fetch('/api/rounds/current'),
           fetch('/api/my-predictions', {
+            headers: { 'Authorization': `Bearer ${token}` }
+          }),
+          fetch('/api/my-wallet', {
             headers: { 'Authorization': `Bearer ${token}` }
           })
         ]);
@@ -585,11 +591,17 @@ const Dashboard = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
           const errorData = await predRes.json().catch(() => ({}));
           throw new Error(`Erro ao carregar palpites: ${errorData.error || predRes.statusText}`);
         }
+        if (!walletRes.ok) {
+          const errorData = await walletRes.json().catch(() => ({}));
+          throw new Error(`Erro ao carregar carteira: ${errorData.error || walletRes.statusText}`);
+        }
 
         const roundData = await roundRes.json();
         const predData = await predRes.json();
+        const walletData = await walletRes.json();
         setCurrentRound(roundData);
         setMyPredictions(predData);
+        setWalletData(walletData);
       } catch (err: any) {
         console.error('Dashboard error:', err);
         setError(err.message);
@@ -629,6 +641,30 @@ const Dashboard = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Main Content */}
         <div className="lg:col-span-2 space-y-8">
+          {/* Wallet Summary */}
+          {walletData && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-3xl p-6 text-white shadow-md flex items-center justify-between">
+                <div>
+                  <p className="text-green-100 font-medium mb-1">Total Ganho</p>
+                  <p className="text-3xl font-bold">R$ {walletData.totalWinnings?.toFixed(2) || '0.00'}</p>
+                </div>
+                <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center">
+                  <TrendingUp className="w-6 h-6 text-white" />
+                </div>
+              </div>
+              <div className="bg-white rounded-3xl p-6 border border-gray-100 shadow-sm flex items-center justify-between cursor-pointer hover:shadow-md transition-all" onClick={() => onNavigate('wallet')}>
+                <div>
+                  <p className="text-gray-500 font-medium mb-1">Minha Carteira</p>
+                  <p className="text-xl font-bold text-primary">Ver Detalhes</p>
+                </div>
+                <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
+                  <Wallet className="w-6 h-6 text-primary" />
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Current Round Card */}
           <div className="bg-white rounded-3xl p-8 border border-gray-100 shadow-sm">
             <div className="flex justify-between items-start mb-8">
@@ -671,34 +707,92 @@ const Dashboard = ({ onNavigate }: { onNavigate: (page: string) => void }) => {
             <h2 className="text-2xl font-bold text-primary mb-6">Meus Palpites</h2>
             <div className="space-y-4">
               {myPredictions.length > 0 ? myPredictions.map((pred) => (
-                <div key={pred.id} className="flex items-center justify-between p-4 border border-gray-100 rounded-2xl hover:bg-gray-50 transition-colors">
-                  <div className="flex items-center space-x-4">
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                      pred.status === 'approved' ? 'bg-green-100 text-green-600' : 
-                      pred.status === 'rejected' ? 'bg-red-100 text-red-600' : 'bg-yellow-100 text-yellow-600'
-                    }`}>
-                      {pred.status === 'approved' ? <CheckCircle2 className="w-5 h-5" /> : 
-                       pred.status === 'rejected' ? <X className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+                <div key={pred.id} className="border border-gray-100 rounded-2xl overflow-hidden hover:shadow-sm transition-shadow">
+                  <div 
+                    onClick={() => setExpandedPrediction(expandedPrediction === pred.id ? null : pred.id)}
+                    className="flex items-center justify-between p-4 bg-white hover:bg-gray-50 transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center space-x-4">
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                        pred.status === 'approved' ? 'bg-green-100 text-green-600' : 
+                        pred.status === 'rejected' ? 'bg-red-100 text-red-600' : 'bg-yellow-100 text-yellow-600'
+                      }`}>
+                        {pred.status === 'approved' ? <CheckCircle2 className="w-5 h-5" /> : 
+                         pred.status === 'rejected' ? <X className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+                      </div>
+                      <div>
+                        <p className="font-bold text-primary">Rodada #{pred.round_number}</p>
+                        <p className="text-xs text-gray-500">{format(new Date(pred.created_at), 'dd/MM/yyyy HH:mm')}</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-bold text-primary">Rodada #{pred.round_number}</p>
-                      <p className="text-xs text-gray-500">{format(new Date(pred.created_at), 'dd/MM/yyyy HH:mm')}</p>
+                    <div className="flex items-center space-x-4">
+                      <div className="text-right">
+                        <p className="text-sm font-medium text-gray-700">
+                          {pred.status === 'approved' 
+                            ? (pred.round_status === 'finished' ? `${pred.score} pontos` : 'Em andamento') 
+                            : 'Aguardando'}
+                        </p>
+                        <p className={`text-xs ${
+                          pred.status === 'approved' ? 'text-green-600' : 
+                          pred.status === 'rejected' ? 'text-red-600' : 'text-yellow-600'
+                        }`}>
+                          {pred.status === 'approved' ? 'Validado' : 
+                           pred.status === 'rejected' ? 'Rejeitado' : 'Pendente'}
+                        </p>
+                      </div>
+                      <ChevronRight className={`w-5 h-5 text-gray-400 transition-transform ${expandedPrediction === pred.id ? 'rotate-90' : ''}`} />
                     </div>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm font-medium text-gray-700">
-                      {pred.status === 'approved' 
-                        ? (pred.round_status === 'finished' ? `${pred.score} pontos` : 'Em andamento') 
-                        : 'Aguardando'}
-                    </p>
-                    <p className={`text-xs ${
-                      pred.status === 'approved' ? 'text-green-600' : 
-                      pred.status === 'rejected' ? 'text-red-600' : 'text-yellow-600'
-                    }`}>
-                      {pred.status === 'approved' ? 'Validado' : 
-                       pred.status === 'rejected' ? 'Rejeitado' : 'Pendente'}
-                    </p>
-                  </div>
+                  
+                  <AnimatePresence>
+                    {expandedPrediction === pred.id && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="bg-gray-50 border-t border-gray-100"
+                      >
+                        <div className="p-4">
+                          <h4 className="text-sm font-bold text-gray-700 mb-3">Seus Palpites</h4>
+                          {pred.items && pred.games ? (
+                            <div className="space-y-2">
+                              {pred.games.map((game: any) => {
+                                const item = pred.items.find((i: any) => i.game_id === game.id);
+                                const guess = item?.guess;
+                                const isCorrect = game.result && guess === game.result;
+                                const isFinished = !!game.result;
+                                
+                                return (
+                                  <div key={game.id} className="flex items-center justify-between bg-white p-3 rounded-xl border border-gray-100">
+                                    <div className="flex items-center space-x-3 flex-1">
+                                      <span className="text-xs font-bold text-gray-400 w-4">{game.game_order + 1}</span>
+                                      <div className="flex-1 flex justify-between items-center text-sm">
+                                        <span className={`font-medium ${guess === 'home' ? 'text-primary' : 'text-gray-600'}`}>{game.home_team}</span>
+                                        <span className="text-gray-300 mx-2">x</span>
+                                        <span className={`font-medium ${guess === 'away' ? 'text-primary' : 'text-gray-600'}`}>{game.away_team}</span>
+                                      </div>
+                                    </div>
+                                    <div className="ml-4 flex items-center space-x-2">
+                                      <span className="text-xs font-bold bg-gray-100 px-2 py-1 rounded text-gray-600">
+                                        {guess === 'home' ? 'Casa' : guess === 'away' ? 'Fora' : 'Empate'}
+                                      </span>
+                                      {isFinished && (
+                                        isCorrect 
+                                          ? <CheckCircle2 className="w-4 h-4 text-green-500" />
+                                          : <X className="w-4 h-4 text-red-500" />
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-gray-500 italic">Detalhes não disponíveis.</p>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               )) : (
                 <p className="text-gray-500 text-center py-8">Você ainda não fez nenhum palpite.</p>
@@ -748,11 +842,13 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
   const { token } = useAuth();
   const [round, setRound] = useState<any>(null);
   const [guesses, setGuesses] = useState<Record<number, string>>({});
+  const [predictionsList, setPredictionsList] = useState<Record<number, string>[]>([]);
   const [step, setStep] = useState(1); // 1: Palpites, 2: Pagamento
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showDeadlinePopup, setShowDeadlinePopup] = useState(false);
 
   useEffect(() => {
     fetch('/api/rounds/current')
@@ -763,6 +859,9 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
       .then(data => {
         setRound(data);
         setLoading(false);
+        if (data && data.start_time && new Date() > new Date(data.start_time)) {
+          setShowDeadlinePopup(true);
+        }
       })
       .catch(err => {
         console.error('Predictions error:', err);
@@ -771,16 +870,46 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
   }, []);
 
   const handleGuess = (gameId: number, guess: string) => {
+    if (round && round.start_time && new Date() > new Date(round.start_time)) {
+      setShowDeadlinePopup(true);
+      return;
+    }
     setGuesses(prev => ({ ...prev, [gameId]: guess }));
   };
 
+  const handleAddPrediction = () => {
+    if (round && round.start_time && new Date() > new Date(round.start_time)) {
+      setShowDeadlinePopup(true);
+      return;
+    }
+    setPredictionsList(prev => [...prev, guesses]);
+    setGuesses({});
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleProceedToPayment = () => {
+    if (round && round.start_time && new Date() > new Date(round.start_time)) {
+      setShowDeadlinePopup(true);
+      return;
+    }
+    if (Object.keys(guesses).length === 10) {
+      setPredictionsList(prev => [...prev, guesses]);
+      setGuesses({});
+    }
+    setStep(2);
+  };
+
   const handleSubmit = async () => {
+    if (round && round.start_time && new Date() > new Date(round.start_time)) {
+      setShowDeadlinePopup(true);
+      return;
+    }
     if (!file) return alert('Por favor, anexe o comprovante.');
     setSubmitting(true);
     
     const formData = new FormData();
     formData.append('roundId', round.id);
-    formData.append('guesses', JSON.stringify(guesses));
+    formData.append('guesses', JSON.stringify(predictionsList));
     formData.append('proof', file);
 
     try {
@@ -790,7 +919,7 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
         body: formData
       });
       if (res.ok) {
-        alert('Palpite enviado com sucesso! Aguarde a validação.');
+        alert('Palpite(s) enviado(s) com sucesso! Aguarde a validação.');
         onNavigate('dashboard');
       } else {
         const data = await res.json();
@@ -803,14 +932,18 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
     }
   };
 
+  const pixPayload = "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-4266141740005204000053039865802BR5913Bolao10 Admin6009Sao Paulo62070503***6304ABCD";
+
   const copyPix = () => {
-    navigator.clipboard.writeText('admin@bolao10.com');
+    navigator.clipboard.writeText(pixPayload);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   if (loading) return <div className="flex justify-center items-center h-64">Carregando...</div>;
   if (!round || round.status !== 'open') return <div className="text-center py-20">Nenhuma rodada aberta no momento.</div>;
+
+  const totalAmount = (predictionsList.length || 1) * (round.entry_value || 10);
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
@@ -829,6 +962,13 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
             Selecione o resultado de cada um dos 10 jogos abaixo. 1 = Mandante, X = Empate, 2 = Visitante.
           </div>
           
+          {predictionsList.length > 0 && (
+            <div className="bg-green-50 p-4 rounded-2xl text-green-700 text-sm mb-6 flex items-center justify-between">
+              <span className="font-bold">{predictionsList.length} palpite(s) adicionado(s) ao carrinho.</span>
+              <span className="font-bold">Total: R$ {(predictionsList.length * (round.entry_value || 10)).toFixed(2)}</span>
+            </div>
+          )}
+
           {round.games.map((game: any) => (
             <div key={game.id} className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex-1 grid grid-cols-3 items-center gap-4">
@@ -854,23 +994,38 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
             </div>
           ))}
 
-          <button
-            disabled={Object.keys(guesses).length < 10}
-            onClick={() => setStep(2)}
-            className="w-full bg-primary text-white py-4 rounded-2xl font-bold text-lg hover:shadow-lg transition-all disabled:opacity-50 mt-8"
-          >
-            Continuar para Pagamento
-          </button>
+          <div className="flex flex-col sm:flex-row gap-4 mt-8">
+            <button
+              disabled={Object.keys(guesses).length < 10}
+              onClick={handleAddPrediction}
+              className="flex-1 bg-gray-100 text-primary py-4 rounded-2xl font-bold text-lg hover:bg-gray-200 transition-all disabled:opacity-50"
+            >
+              Fazer Mais um Palpite
+            </button>
+            <button
+              disabled={Object.keys(guesses).length < 10 && predictionsList.length === 0}
+              onClick={handleProceedToPayment}
+              className="flex-1 bg-primary text-white py-4 rounded-2xl font-bold text-lg hover:shadow-lg transition-all disabled:opacity-50"
+            >
+              Continuar para Pagamento
+            </button>
+          </div>
         </motion.div>
       ) : (
         <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8">
           <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm text-center">
             <h3 className="text-xl font-bold text-primary mb-4">Pagamento via PIX</h3>
-            <p className="text-gray-600 mb-6">Para validar seu palpite, realize o pagamento de <span className="font-bold text-primary">R$ {round.entry_value.toFixed(2)}</span> para a chave abaixo:</p>
+            <p className="text-gray-600 mb-6">Para validar {predictionsList.length} palpite(s), realize o pagamento de <span className="font-bold text-primary">R$ {totalAmount.toFixed(2)}</span> utilizando o QR Code ou a chave Copia e Cola abaixo:</p>
             
-            <div className="bg-gray-50 p-4 rounded-2xl flex items-center justify-between mb-8 max-w-sm mx-auto border border-gray-200">
-              <span className="font-mono font-bold text-primary">admin@bolao10.com</span>
-              <button onClick={copyPix} className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
+            <div className="flex justify-center mb-6">
+              <div className="p-4 bg-white border-2 border-gray-100 rounded-2xl shadow-sm">
+                <QRCode value={pixPayload} size={200} />
+              </div>
+            </div>
+
+            <div className="bg-gray-50 p-4 rounded-2xl flex items-center justify-between mb-8 max-w-md mx-auto border border-gray-200">
+              <span className="font-mono text-sm text-gray-500 truncate mr-4">{pixPayload}</span>
+              <button onClick={copyPix} className="p-2 hover:bg-gray-200 rounded-lg transition-colors flex-shrink-0">
                 {copied ? <Check className="w-5 h-5 text-green-600" /> : <Copy className="w-5 h-5 text-gray-500" />}
               </button>
             </div>
@@ -913,12 +1068,39 @@ const PredictionsPage = ({ onNavigate }: { onNavigate: (page: string) => void })
             <button
               disabled={!file || submitting}
               onClick={handleSubmit}
-              className="flex-[2] bg-secondary text-white py-4 rounded-2xl font-bold hover:shadow-lg transition-all disabled:opacity-50"
+              className="flex-[2] bg-secondary text-white py-4 rounded-2xl font-bold hover:shadow-lg transition-all disabled:opacity-50 flex items-center justify-center"
             >
-              {submitting ? 'Enviando...' : 'Finalizar Palpite'}
+              {submitting ? 'Enviando...' : 'Enviar Comprovante'}
             </button>
           </div>
         </motion.div>
+      )}
+
+      {showDeadlinePopup && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }} 
+            animate={{ opacity: 1, scale: 1 }} 
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl text-center"
+          >
+            <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-6">
+              <AlertCircle className="w-8 h-8 text-red-600" />
+            </div>
+            <h3 className="text-2xl font-bold text-gray-900 mb-4">Prazo Encerrado</h3>
+            <p className="text-gray-600 mb-8">
+              O prazo para enviar palpites nesta rodada já encerrou.
+            </p>
+            <button
+              onClick={() => {
+                setShowDeadlinePopup(false);
+                onNavigate('dashboard');
+              }}
+              className="w-full bg-primary text-white py-4 rounded-2xl font-bold hover:shadow-lg transition-all"
+            >
+              Voltar ao Início
+            </button>
+          </motion.div>
+        </div>
       )}
     </div>
   );
@@ -949,6 +1131,7 @@ const AdminDashboard = () => {
   // Finish Round State
   const [currentRound, setCurrentRound] = useState<any>(null);
   const [results, setResults] = useState<Record<number, string>>({});
+  const [distributeJackpot, setDistributeJackpot] = useState(false);
 
   const fetchPending = async () => {
     const res = await fetch('/api/admin/pending-predictions', {
@@ -1026,18 +1209,24 @@ const AdminDashboard = () => {
 
   const handleFinishRound = async () => {
     if (Object.keys(results).length < 10) return alert('Insira todos os resultados.');
+    
+    if (distributeJackpot) {
+      if (!confirm('Tem certeza que deseja ZERAR O ACUMULADO e distribuir para o(s) vencedor(es) desta rodada?')) return;
+    }
+
     const res = await fetch(`/api/admin/rounds/${currentRound.id}/finish`, {
       method: 'POST',
       headers: { 
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ results })
+      body: JSON.stringify({ results, distributeJackpot })
     });
     const data = await res.json();
     if (res.ok) {
-      alert(`Rodada finalizada!\nPrêmio Vencedores: R$ ${data.summary.winnersPool.toFixed(2)}\nTaxa Admin: R$ ${data.summary.adminFee.toFixed(2)}`);
+      alert(`Rodada finalizada!\nPrêmio Vencedores: R$ ${data.summary.winnersPool.toFixed(2)}\nTaxa Admin: R$ ${data.summary.adminFee.toFixed(2)}${data.summary.jackpotPrizePaid > 0 ? `\nBônus Acumulado Distribuído: R$ ${data.summary.jackpotPrizePaid.toFixed(2)}` : ''}`);
       fetchCurrentRound();
+      setDistributeJackpot(false);
     }
   };
 
@@ -1251,6 +1440,25 @@ const AdminDashboard = () => {
                     </div>
                   </div>
                 ))}
+                
+                <div className="mt-6 mb-2 p-4 bg-yellow-50 border border-yellow-200 rounded-xl flex items-start gap-3">
+                  <input 
+                    type="checkbox" 
+                    id="distributeJackpot"
+                    checked={distributeJackpot}
+                    onChange={(e) => setDistributeJackpot(e.target.checked)}
+                    className="mt-1 w-5 h-5 text-secondary border-gray-300 rounded focus:ring-secondary"
+                  />
+                  <div>
+                    <label htmlFor="distributeJackpot" className="font-bold text-gray-800 cursor-pointer">
+                      Zerar Acumulado e Distribuir
+                    </label>
+                    <p className="text-xs text-gray-600 mt-1">
+                      Ao marcar esta opção, o prêmio acumulado (Bônus 10) será distribuído para o(s) vencedor(es) desta rodada, mesmo que não tenham acertado os 10 jogos. O pote acumulado será zerado.
+                    </p>
+                  </div>
+                </div>
+
                 <button 
                   onClick={handleFinishRound}
                   className="w-full bg-secondary text-white py-3 rounded-xl font-bold mt-4"
